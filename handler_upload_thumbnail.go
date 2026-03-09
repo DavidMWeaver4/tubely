@@ -2,7 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"strings"
+	"path/filepath"
+	"mime"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -28,10 +33,59 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
-	// TODO: implement the upload here
+	const maxMemory = 10 << 20
 
-	respondWithJSON(w, http.StatusOK, struct{}{})
+	r.ParseMultipartForm(maxMemory)
+	file, header, err := r.FormFile("thumbnail")
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Not in correct format", err)
+		return
+	}
+	defer file.Close()
+
+	mediaType, _, err := mime.ParseMediaType(header.Header.Get("Content-Type"))
+	if err != nil {
+    	respondWithError(w, http.StatusBadRequest, "Invalid Content-Type", err)
+    	return
+	}
+
+	if mediaType != "image/jpeg" && mediaType != "image/png" {
+    	respondWithError(w, http.StatusBadRequest, "Unsupported media type", nil)
+    	return
+	}
+	videoMeta, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Could not fetch video data", err)
+		return
+	}
+	if videoMeta.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "This video does not belong to user", nil)
+		return
+	}
+
+	split := strings.Split(mediaType, "/")
+	fileName := fmt.Sprintf("%s.%s", videoID, split[1])
+	filePath := filepath.Join(cfg.assetsRoot, fileName)
+	thumbURL := fmt.Sprintf("http://localhost:%s/assets/%s", cfg.port, fileName)
+	newFile, err := os.Create(filePath)
+	if err != nil{
+		respondWithError(w, http.StatusBadRequest, "Could not create file", err)
+		return
+	}
+	_, err = io.Copy(newFile, file)
+	if err != nil{
+		respondWithError(w, http.StatusBadRequest, "Could not copy file", err)
+		return
+	}
+	videoMeta.ThumbnailURL = &thumbURL
+
+	err = cfg.db.UpdateVideo(videoMeta)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Not not store to database", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, videoMeta)
 }
